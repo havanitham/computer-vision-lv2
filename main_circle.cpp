@@ -73,7 +73,7 @@ int detect_round(const string &path, const Mat &img) {
 
 
 int main() {
-    string image_path = "C:/Users/swara/Downloads/imgs/img3.jpeg";
+    string image_path = "";
 
     Mat img = imread(image_path);
     if (img.empty()) {
@@ -84,3 +84,4 @@ int main() {
     detect_round(image_path, img);
     return 0;
 }
+
