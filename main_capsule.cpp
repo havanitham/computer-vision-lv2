@@ -1,37 +1,14 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
-#include <cmath>
-#include <string>
 #include <set>
-
-
-std::string save_with_suffix(const std::string &path, const std::string &suffix = "_detected")
-{
-
-    size_t slash_pos = path.find_last_of("/\\");
-    if (slash_pos == std::string::npos)
-        slash_pos = 0;
-    else
-        slash_pos += 1;
-
-    size_t dot_pos = path.find_last_of('.');
-    if (dot_pos == std::string::npos || dot_pos < slash_pos)
-    {
-  
-        return path + suffix + ".png";
-    }
-    std::string base = path.substr(0, dot_pos);
-    return base + suffix + ".png";
-}
-
+#include <cmath>
 
 static double chroma_lab(float L, float a, float b)
 {
-  
-    return std::sqrt((a - 128.0f) * (a - 128.0f) + (b - 128.0f) * (b - 128.0f));
+    return std::sqrt((a - 128.0f)*(a - 128.0f) + (b - 128.0f)*(b - 128.0f));
 }
 
-cv::Mat kmeans_pill_mask(const cv::Mat &img, int K = 2, double scale = 0.25)
+cv::Mat kmeans_pill_mask(const cv::Mat &img)
 {
     int h = img.rows;
     int w = img.cols;
@@ -39,214 +16,162 @@ cv::Mat kmeans_pill_mask(const cv::Mat &img, int K = 2, double scale = 0.25)
     cv::Mat lab;
     cv::cvtColor(img, lab, cv::COLOR_BGR2Lab);
 
-    int small_w = std::max(1, static_cast<int>(w * scale));
-    int small_h = std::max(1, static_cast<int>(h * scale));
+    int sw = w * 0.25;
+    int sh = h * 0.25;
+    if (sw < 1) sw = 1;
+    if (sh < 1) sh = 1;
 
     cv::Mat small;
-    cv::resize(lab, small, cv::Size(small_w, small_h), 0, 0, cv::INTER_AREA);
+    cv::resize(lab, small, cv::Size(sw, sh), 0, 0, cv::INTER_AREA);
 
+    cv::Mat samples(sh * sw, 3, CV_32F);
 
-    cv::Mat samples(small_h * small_w, 3, CV_32F);
-    for (int y = 0; y < small_h; ++y)
-    {
-        for (int x = 0; x < small_w; ++x)
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
         {
             cv::Vec3b c = small.at<cv::Vec3b>(y, x);
-            int idx = y * small_w + x;
-            samples.at<float>(idx, 0) = static_cast<float>(c[0]); // L
-            samples.at<float>(idx, 1) = static_cast<float>(c[1]); // a
-            samples.at<float>(idx, 2) = static_cast<float>(c[2]); // b
+            int idx = y * sw + x;
+
+            samples.at<float>(idx, 0) = c[0];
+            samples.at<float>(idx, 1) = c[1];
+            samples.at<float>(idx, 2) = c[2];
         }
-    }
 
-    cv::Mat labels;
-    cv::Mat centers; // K x 3, CV_32F
-    cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 20, 1.0);
+    cv::Mat labels, centers;
+    cv::TermCriteria crit(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 20, 1.0);
 
-    cv::kmeans(samples, K, labels, criteria, 5, cv::KMEANS_PP_CENTERS, centers);
-
+    cv::kmeans(samples, 2, labels, crit, 5, cv::KMEANS_PP_CENTERS, centers);
 
     int pill_label = 0;
-    double max_chroma = -1.0;
-    for (int k = 0; k < K; ++k)
+    double best = -1;
+
+    for (int k = 0; k < 2; k++)
     {
         float L = centers.at<float>(k, 0);
         float a = centers.at<float>(k, 1);
         float b = centers.at<float>(k, 2);
+
         double ch = chroma_lab(L, a, b);
-        if (ch > max_chroma)
+        if (ch > best)
         {
-            max_chroma = ch;
+            best = ch;
             pill_label = k;
         }
     }
 
-    cv::Mat labelImg = labels.reshape(1, small_h); 
-    cv::Mat mask_small(small_h, small_w, CV_8U);
-    for (int y = 0; y < small_h; ++y)
-    {
-        for (int x = 0; x < small_w; ++x)
-        {
-            int lbl = labelImg.at<int>(y, x);
-            mask_small.at<uchar>(y, x) = (lbl == pill_label) ? 255 : 0;
-        }
-    }
+    cv::Mat labelImg = labels.reshape(1, sh);
+    cv::Mat mask_small(sh, sw, CV_8U);
 
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++)
+            mask_small.at<uchar>(y, x) = (labelImg.at<int>(y, x) == pill_label ? 255 : 0);
 
     cv::Mat mask;
     cv::resize(mask_small, mask, cv::Size(w, h), 0, 0, cv::INTER_NEAREST);
 
-    return mask; 
+    return mask;
 }
 
-
-int detect_capsule_pills(const std::string &path, bool show_windows = true)
+int detect_capsule_pills(const std::string &path)
 {
     cv::Mat img = cv::imread(path);
     if (img.empty())
     {
-        throw std::runtime_error("Could not read image: " + path);
+        std::cout << "Image not found\n";
+        return -1;
     }
 
     int h = img.rows;
     int w = img.cols;
 
-  
-    cv::Mat mask = kmeans_pill_mask(img, 2, 0.25);
+    cv::Mat mask = kmeans_pill_mask(img);
 
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3,3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
 
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 1);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel, cv::Point(-1, -1), 2);
-
- 
     cv::Mat dist;
     cv::distanceTransform(mask, dist, cv::DIST_L2, 5);
 
-    double minVal, maxVal;
-    cv::minMaxLoc(dist, &minVal, &maxVal);
-
-    cv::Mat sureFgFloat;
-    cv::threshold(dist, sureFgFloat, 0.30 * maxVal, 255.0, cv::THRESH_BINARY);
+    double mn, mx;
+    cv::minMaxLoc(dist, &mn, &mx);
 
     cv::Mat sure_fg;
-    sureFgFloat.convertTo(sure_fg, CV_8U);
+    cv::threshold(dist, sure_fg, 0.3 * mx, 255, cv::THRESH_BINARY);
+    sure_fg.convertTo(sure_fg, CV_8U);
 
     cv::Mat sure_bg;
-    cv::dilate(mask, sure_bg, kernel, cv::Point(-1, -1), 2);
+    cv::dilate(mask, sure_bg, kernel);
 
     cv::Mat unknown;
     cv::subtract(sure_bg, sure_fg, unknown);
 
     cv::Mat markers;
-    int n_labels = cv::connectedComponents(sure_fg, markers);
-    markers += 1;                       
-    markers.setTo(0, unknown == 255);   
+    cv::connectedComponents(sure_fg, markers);
 
+    markers += 1;
+    markers.setTo(0, unknown == 255);
 
-    cv::watershed(img, markers);        
-
+    cv::watershed(img, markers);
 
     cv::Mat out = img.clone();
-    int pill_id = 0;
-    double min_area = 0.0005 * h * w;  
+    int count = 0;
 
-    std::set<int> labels_set;
-    for (int y = 0; y < h; ++y)
+    std::set<int> labs;
+    for (int y = 0; y < h; y++)
     {
-        const int *row = markers.ptr<int>(y);
-        for (int x = 0; x < w; ++x)
-        {
-            labels_set.insert(row[x]);
-        }
+        const int* r = markers.ptr<int>(y);
+        for (int x = 0; x < w; x++)
+            labs.insert(r[x]);
     }
 
-    for (int lbl : labels_set)
+    for (int lbl : labs)
     {
-
         if (lbl <= 1) continue;
 
+        cv::Mat comp = (markers == lbl);
+        comp.convertTo(comp, CV_8U);
 
-        cv::Mat comp_mask = (markers == lbl);
-        comp_mask.convertTo(comp_mask, CV_8U); 
+        std::vector<std::vector<cv::Point>> cs;
+        cv::findContours(comp, cs, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-        std::vector<std::vector<cv::Point>> contours;
-        std::vector<cv::Vec4i> hierarchy;
-        cv::findContours(comp_mask, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        if (cs.empty()) continue;
 
-        if (contours.empty())
-            continue;
+        double bestArea = 0;
+        int bi = 0;
 
-
-        size_t best_idx = 0;
-        double best_area = 0.0;
-        for (size_t i = 0; i < contours.size(); ++i)
+        for (int i = 0; i < cs.size(); i++)
         {
-            double a = cv::contourArea(contours[i]);
-            if (a > best_area)
+            double a = cv::contourArea(cs[i]);
+            if (a > bestArea)
             {
-                best_area = a;
-                best_idx = i;
+                bestArea = a;
+                bi = i;
             }
         }
 
-        if (best_area < min_area)
-            continue;
+        count++;
+        cv::drawContours(out, cs, bi, cv::Scalar(0,255,0), 2);
 
-        std::vector<cv::Point> c = contours[best_idx];
-
-
-        double eps = 0.01 * cv::arcLength(c, true);
-        std::vector<cv::Point> approx;
-        cv::approxPolyDP(c, approx, eps, true);
-
-        ++pill_id;
-        cv::drawContours(out, std::vector<std::vector<cv::Point>>{approx}, -1, cv::Scalar(0, 255, 0), 2);
-
-        cv::Moments M = cv::moments(approx);
-        if (M.m00 != 0.0)
+        cv::Moments M = cv::moments(cs[bi]);
+        if (M.m00 != 0)
         {
-            int cx = static_cast<int>(M.m10 / M.m00);
-            int cy = static_cast<int>(M.m01 / M.m00);
-            cv::putText(out, std::to_string(pill_id),
-                        cv::Point(cx - 10, cy + 10),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 0, 0), 2);
+            int cx = M.m10 / M.m00;
+            int cy = M.m01 / M.m00;
+            cv::putText(out, std::to_string(count), cv::Point(cx, cy),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,0,0), 2);
         }
     }
 
-    std::cout << "Pills detected in " << path << ": " << pill_id << std::endl;
+    cv::imshow("Mask", mask);
+    cv::imshow("Output", out);
+    cv::waitKey(0);
 
-    std::string save_path = save_with_suffix(path, "_capsule_detected");
-    cv::imwrite(save_path, out);
-    std::cout << "Saved: " << save_path << std::endl;
-
-    if (show_windows)
-    {
-        cv::imshow("Mask", mask);
-        cv::imshow("Capsule pills", out);
-        cv::waitKey(0);
-        cv::destroyAllWindows();
-    }
-
-    return pill_id;
+    return count;
 }
-
 
 int main()
 {
-
-    std::string image_path = "C:/Users/havan/Downloads/Input_Images/yellow.jpg";
-
-    try
-    {
-        detect_capsule_pills(image_path, true);
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-
+    detect_capsule_pills("C:/Users/havan/Downloads/Input_Images/orange_17.png");
     return 0;
 }
-
